@@ -4,6 +4,8 @@ A [Model Context Protocol (MCP)](https://www.anthropic.com/news/model-context-pr
 
 ![AWS MCP](./images/aws-mcp-demo.png)
 
+<a href="https://glama.ai/mcp/servers/ta7kdy57us"><img width="380" height="200" src="https://glama.ai/mcp/servers/ta7kdy57us/badge" alt="aws-mcp MCP server" /></a>
+
 ## Features
 
 - 🔍 Query and modify AWS resources using natural language
