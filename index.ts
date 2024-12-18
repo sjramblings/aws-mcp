@@ -169,7 +169,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request, c) => {
       selectedProfile = profile;
       selectedProfileCredentials = credentials;
       selectedProfileRegion = region || "us-east-1";
-      return createTextResponse(JSON.stringify(credentials));
+      return createTextResponse("Authenticated!");
     } else {
       throw new Error(`Unknown tool: ${name}`);
     }
