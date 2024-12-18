@@ -1,6 +1,6 @@
 # AWS MCP
 
-A [Model Context Protocol (MCP)](https://www.anthropic.com/news/model-context-protocol) server that enables AI assistants like Claude to interact with your AWS environment. This allows for natural language querying and management of your AWS resources during conversations.
+A [Model Context Protocol (MCP)](https://www.anthropic.com/news/model-context-protocol) server that enables AI assistants like Claude to interact with your AWS environment. This allows for natural language querying and management of your AWS resources during conversations. Think of better Amazon Q alternative.
 
 ![AWS MCP](./images/aws-mcp-demo.png)
 
@@ -10,7 +10,6 @@ A [Model Context Protocol (MCP)](https://www.anthropic.com/news/model-context-pr
 - ☁️ Support for multiple AWS profiles and SSO authentication
 - 🌐 Multi-region support
 - 🔐 Secure credential handling (no credentials are exposed to external services, your local credentials are used)
-- 🤖 MCP-compatible server for AI assistant integration
 - 🏃‍♂️ Local execution with your AWS credentials
 
 ## Prerequisites
@@ -40,6 +39,8 @@ npm install
 
 1. Open Claude desktop app and go to Settings -> Developer -> Edit Config
 
+![Claude Settings](./images/desktop_settings.png)
+
 2. Add the following entry to your `claude_desktop_config.json`:
 
 ```json
@@ -55,19 +56,16 @@ npm install
 
 Important: Replace `/Users/<YOUR USERNAME>/aws-mcp` with the actual path to your project directory.
 
-3. Restart Claude desktop app to apply the changes.
+3. Restart Claude desktop app. You should see this:
 
-4. Start by selecting an AWS profile. You can ask Claude:
+![Claude MCP Connection Status](./images/verify_installation.png)
+
+4. Start by selecting an AWS profile or jump to action by asking:
    - "List available AWS profiles"
-   - "Select profile 'your-profile-name'"
-   - Then start querying your AWS environment!
-
-## Example Queries
-
-- "List all EC2 instances in my account"
-- "Show me S3 buckets with their sizes"
-- "What Lambda functions are running in us-east-1?"
-- "List all ECS clusters and their services"
+   - "List all EC2 instances in my account"
+   - "Show me S3 buckets with their sizes"
+   - "What Lambda functions are deployed in us-east-1?"
+   - "List all ECS clusters and their services"
 
 ## Troubleshooting
 
