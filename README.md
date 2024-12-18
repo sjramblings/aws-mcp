@@ -80,3 +80,4 @@ tail -n 50 -f ~/Library/Logs/Claude/mcp.log
 ## Features in Development
 
 - [ ] MFA support
+- [ ] Cache SSO credentials to prevent from refreshing them too eagerly
