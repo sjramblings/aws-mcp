@@ -47,8 +47,13 @@ npm install
 {
   "mcpServers": {
     "aws": {
-      "command": "npm",
-      "args": ["--prefix", "/Users/<YOUR USERNAME>/aws-mcp", "start"]
+      "command": "npm", // OR pnpm
+      "args": [
+        "--silent",
+        "--prefix",
+        "/Users/<YOUR USERNAME>/aws-mcp",
+        "start"
+      ]
     }
   }
 }

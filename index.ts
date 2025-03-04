@@ -1,3 +1,5 @@
+process.env.AWS_SDK_JS_SUPPRESS_MAINTENANCE_MODE_MESSAGE = "1";
+
 import { Project, SyntaxKind } from "ts-morph";
 import { createContext, runInContext } from "node:vm";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
