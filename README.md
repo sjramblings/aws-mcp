@@ -86,3 +86,5 @@ tail -n 50 -f ~/Library/Logs/Claude/mcp.log
 
 - [ ] MFA support
 - [ ] Cache SSO credentials to prevent from refreshing them too eagerly
+
+<a href="https://glama.ai/mcp/servers/ta7kdy57us"><img width="380" height="200" src="https://glama.ai/mcp/servers/ta7kdy57us/badge" alt="aws-mcp MCP server" /></a>
