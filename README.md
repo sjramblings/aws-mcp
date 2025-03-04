@@ -72,6 +72,27 @@ Important: Replace `/Users/<YOUR USERNAME>/aws-mcp` with the actual path to your
    - "What Lambda functions are deployed in us-east-1?"
    - "List all ECS clusters and their services"
 
+## Using with `nvm`
+
+Build from source first and add following config:
+
+```json
+{
+  "mcpServers": {
+    "aws": {
+      "command": "/Users/<USERNAME>/.nvm/versions/node/v20.10.0/bin/node",
+      "args": [
+        "<WORKSPACE_PATH>/aws-mcp/node_modules/tsx/dist/cli.mjs",
+        "<WORKSPACE_PATH>/aws-mcp/index.ts",
+        "--prefix",
+        "<WORKSPACE_PATH>/aws-mcp",
+        "start"
+      ]
+    }
+  }
+}
+```
+
 ## Troubleshooting
 
 To see logs:
