@@ -216,17 +216,25 @@ async function listCredentials() {
   let configs: any;
   let error: any;
   try {
+    console.error('Loading credentials from ini file...');
     credentials = new AWS.IniLoader().loadFrom({});
+    console.error('Loaded credentials:', Object.keys(credentials || {}));
   } catch (error) {
+    console.error('Failed to load credentials:', error);
     error = `Failed to load credentials: ${error}`;
   }
   try {
+    console.error('Loading config from ini file...');
     configs = new AWS.IniLoader().loadFrom({ isConfig: true });
+    console.error('Loaded configs:', Object.keys(configs || {}));
   } catch (error) {
+    console.error('Failed to load configs:', error);
     error = `Failed to load configs: ${error}`;
   }
 
   const profiles = { ...(credentials || {}), ...(configs || {}) };
+  console.error('Combined profiles:', Object.keys(profiles));
+  console.error('Profile details:', JSON.stringify(profiles, null, 2));
 
   return { profiles, error };
 }
@@ -235,99 +243,209 @@ async function getCredentials(
   creds: any,
   profileName: string
 ): Promise<AWS.Credentials | AWS.SSO.RoleCredentials | any> {
-  if (creds.sso_start_url) {
-    const region = creds.region || "us-east-1";
-    const ssoStartUrl = creds.sso_start_url;
-    const oidc = new AWS.SSOOIDC({ region });
-
-    const registration = await oidc
-      .registerClient({ clientName: "chatwithcloud", clientType: "public" })
-      .promise();
-
-    const auth = await oidc
-      .startDeviceAuthorization({
-        clientId: registration.clientId!,
-        clientSecret: registration.clientSecret!,
-        startUrl: ssoStartUrl,
-      })
-      .promise();
-
-    // open this in URL browser
-    if (auth.verificationUriComplete) {
-      open(auth.verificationUriComplete);
-    }
-
-    let handleId: NodeJS.Timeout;
-    return new Promise((resolve) => {
-      handleId = setInterval(async () => {
-        try {
-          const createTokenReponse = await oidc
-            .createToken({
-              clientId: registration.clientId!,
-              clientSecret: registration.clientSecret!,
-              grantType: "urn:ietf:params:oauth:grant-type:device_code",
-              deviceCode: auth.deviceCode,
-            })
-            .promise();
-
-          const sso = new AWS.SSO({ region });
-
-          const credentials = await sso
-            .getRoleCredentials({
-              accessToken: createTokenReponse.accessToken!,
-              accountId: creds.sso_account_id,
-              roleName: creds.sso_role_name,
-            })
-            .promise();
-
-          clearInterval(handleId);
-
-          return resolve(credentials.roleCredentials!);
-        } catch (error) {
-          if ((error as Error).message !== null) {
-            // terminal.error(error);
+  process.stderr.write(`\nDebug: Starting credential load for profile ${profileName}\n`);
+  process.stderr.write(`\nDebug: Profile config: ${JSON.stringify(creds, null, 2)}\n`);
+  
+  if (creds.sso_session) {
+    process.stderr.write('\nDebug: SSO session profile detected\n');
+    
+    try {
+      // First try to load the SSO session configuration
+      const fs = await import('fs/promises');
+      const path = await import('path');
+      const { exec } = await import('child_process');
+      const util = await import('util');
+      const execPromise = util.promisify(exec);
+      
+      const configContent = await fs.readFile(`${process.env.HOME}/.aws/config`, 'utf8');
+      const sessionMatch = configContent.match(new RegExp(`\\[sso-session ${creds.sso_session}\\][^[]*`));
+      
+      if (!sessionMatch) {
+        throw new Error(`SSO session ${creds.sso_session} not found in config`);
+      }
+      
+      const sessionConfig = sessionMatch[0];
+      const startUrl = sessionConfig.match(/sso_start_url\s*=\s*(.+)/)?.[1];
+      const ssoRegion = sessionConfig.match(/sso_region\s*=\s*(.+)/)?.[1] || creds.region || 'us-east-1';
+      
+      if (!startUrl) {
+        throw new Error('No sso_start_url found in session config');
+      }
+      
+      process.stderr.write(`\nDebug: Found SSO session config. Region: ${ssoRegion}\n`);
+      
+      // Ensure SSO cache directory exists
+      const ssoDir = `${process.env.HOME}/.aws/sso/cache`;
+      try {
+        await fs.mkdir(ssoDir, { recursive: true });
+      } catch (e) {
+        process.stderr.write(`\nDebug: Error creating SSO cache directory: ${e}\n`);
+      }
+      
+      let validTokenFound = false;
+      let validToken = null;
+      
+      // Try to read SSO token from cache
+      try {
+        const files = await fs.readdir(ssoDir);
+        process.stderr.write(`\nDebug: Found SSO cache files: ${files.join(', ')}\n`);
+        
+        // Read each cache file to find valid token
+        for (const file of files) {
+          try {
+            const content = await fs.readFile(`${ssoDir}/${file}`, 'utf8');
+            const cache = JSON.parse(content);
+            process.stderr.write(`\nDebug: Examining cache file ${file}\n`);
+            
+            if (cache.startUrl === startUrl && cache.accessToken && cache.expiresAt && new Date(cache.expiresAt) > new Date()) {
+              process.stderr.write('\nDebug: Found valid SSO token in cache\n');
+              validTokenFound = true;
+              validToken = cache.accessToken;
+              break;
+            }
+          } catch (e) {
+            process.stderr.write(`\nDebug: Error reading cache file ${file}: ${e}\n`);
           }
         }
-      }, 2500);
-    });
-  } else {
-    return useAWSCredentialsProvider(profileName);
+      } catch (e) {
+        process.stderr.write(`\nDebug: Error reading SSO cache directory: ${e}\n`);
+      }
+      
+      // If no valid token found, initiate SSO login
+      if (!validTokenFound) {
+        process.stderr.write('\nDebug: No valid token found, initiating SSO login\n');
+        
+        try {
+          // Run AWS CLI SSO login command
+          process.stderr.write(`\nDebug: Running 'aws sso login --profile ${profileName}'\n`);
+          process.stderr.write('\nPlease complete the SSO login in your browser when prompted...\n');
+          
+          const { stdout, stderr } = await execPromise(`aws sso login --profile ${profileName}`);
+          process.stderr.write(`\nSSO Login stdout: ${stdout}\n`);
+          if (stderr) process.stderr.write(`\nSSO Login stderr: ${stderr}\n`);
+          
+          // Check again for valid token after login
+          const files = await fs.readdir(ssoDir);
+          for (const file of files) {
+            try {
+              const content = await fs.readFile(`${ssoDir}/${file}`, 'utf8');
+              const cache = JSON.parse(content);
+              
+              if (cache.startUrl === startUrl && cache.accessToken && cache.expiresAt && new Date(cache.expiresAt) > new Date()) {
+                process.stderr.write('\nDebug: Found valid SSO token after login\n');
+                validTokenFound = true;
+                validToken = cache.accessToken;
+                break;
+              }
+            } catch (e) {
+              process.stderr.write(`\nDebug: Error reading cache file ${file} after login: ${e}\n`);
+            }
+          }
+        } catch (e) {
+          process.stderr.write(`\nDebug: Error during SSO login: ${e}\n`);
+        }
+      }
+      
+      // If we have a valid token, get role credentials
+      if (validTokenFound && validToken) {
+        // Create SSO service with the cached token
+        const sso = new AWS.SSO({ region: ssoRegion });
+        
+        try {
+          process.stderr.write('\nDebug: Attempting to get role credentials\n');
+          const roleCredentials = await sso.getRoleCredentials({
+            accessToken: validToken,
+            accountId: creds.sso_account_id,
+            roleName: creds.sso_role_name
+          }).promise();
+          
+          if (!roleCredentials.roleCredentials) {
+            throw new Error('No role credentials returned');
+          }
+          
+          const { accessKeyId, secretAccessKey, sessionToken, expiration } = roleCredentials.roleCredentials;
+          
+          if (!accessKeyId || !secretAccessKey || !sessionToken || !expiration) {
+            throw new Error('Incomplete role credentials returned');
+          }
+          
+          process.stderr.write('\nDebug: Successfully obtained role credentials\n');
+          return new AWS.Credentials({
+            accessKeyId,
+            secretAccessKey,
+            sessionToken
+          });
+        } catch (e) {
+          process.stderr.write(`\nDebug: Error getting role credentials: ${e}\n`);
+        }
+      } else {
+        process.stderr.write('\nDebug: Failed to obtain valid SSO token\n');
+      }
+    } catch (e) {
+      process.stderr.write(`\nDebug: Error in SSO session handling: ${e}\n`);
+    }
   }
+  
+  // Fall back to standard credential provider
+  process.stderr.write('\nDebug: Falling back to standard credential provider\n');
+  return useAWSCredentialsProvider(profileName);
 }
 
-export const useAWSCredentialsProvider = (
+export const useAWSCredentialsProvider = async (
   profileName: string,
   region: string = "us-east-1",
   roleArn?: string
 ) => {
-  const provider = fromNodeProviderChain({
-    clientConfig: { region: region },
-    profile: profileName,
-    roleArn,
-    // TODO: use a better MFA provider that works with Claude
-    mfaCodeProvider: async (serialArn: string) => {
-      const readline = await import("readline");
-      const rl = readline.createInterface({
-        input: process.stdin,
-        output: process.stdout,
+  process.stderr.write(`\nDebug: Using credential provider for profile ${profileName}\n`);
+  
+  try {
+    // Try to use AWS SDK v3 credential provider first
+    const provider = fromNodeProviderChain({
+      clientConfig: { region },
+      profile: profileName,
+      roleArn
+    });
+    
+    process.stderr.write('\nDebug: Attempting to get credentials from provider chain\n');
+    const credentials = await provider();
+    process.stderr.write('\nDebug: Successfully obtained credentials from provider chain\n');
+    
+    // Convert v3 credentials to v2 format
+    return new AWS.Credentials({
+      accessKeyId: credentials.accessKeyId,
+      secretAccessKey: credentials.secretAccessKey,
+      sessionToken: credentials.sessionToken
+    });
+  } catch (error) {
+    process.stderr.write(`\nDebug: Provider chain error: ${error}\n`);
+    
+    // Fall back to AWS SDK v2 credential provider
+    try {
+      process.stderr.write('\nDebug: Falling back to AWS SDK v2 credential provider\n');
+      const chain = new AWS.CredentialProviderChain([
+        () => new AWS.SharedIniFileCredentials({ profile: profileName }),
+        () => new AWS.ProcessCredentials({ profile: profileName }),
+        () => new AWS.EnvironmentCredentials('AWS'),
+        () => new AWS.EnvironmentCredentials('AMAZON'),
+        () => new AWS.EC2MetadataCredentials()
+      ]);
+      
+      return await new Promise((resolve, reject) => {
+        chain.resolve((err, creds) => {
+          if (err) {
+            process.stderr.write(`\nDebug: AWS SDK v2 provider chain error: ${err}\n`);
+            reject(err);
+          } else {
+            process.stderr.write('\nDebug: Successfully obtained credentials from AWS SDK v2 provider chain\n');
+            resolve(creds);
+          }
+        });
       });
-      return new Promise<string>((resolve) => {
-        const prompt = () =>
-          rl.question(`Enter MFA code for ${serialArn}: `, async (input) => {
-            if (input.trim() !== "") {
-              resolve(input.trim());
-              rl.close();
-            } else {
-              // prompt again if no input
-              prompt();
-            }
-          });
-        prompt();
-      });
-    },
-  });
-
-  return provider();
+    } catch (v2Error) {
+      process.stderr.write(`\nDebug: AWS SDK v2 provider chain error: ${v2Error}\n`);
+      throw v2Error;
+    }
+  }
 };
 
 // Start the server
