@@ -12,6 +12,46 @@ import { z } from "zod";
 import * as AWS from "aws-sdk";
 import open from "open";
 import { fromNodeProviderChain } from "@aws-sdk/credential-providers";
+import * as winston from 'winston';
+
+// Configure logger
+const logger = winston.createLogger({
+  level: process.env.LOG_LEVEL || 'info',
+  format: winston.format.combine(
+    winston.format.timestamp(),
+    winston.format.json()
+  ),
+  transports: [
+    new winston.transports.Console({
+      format: winston.format.combine(
+        winston.format.colorize(),
+        winston.format.simple()
+      )
+    }),
+    new winston.transports.File({ filename: 'aws-mcp.log' })
+  ]
+});
+
+// Utility function for retrying AWS API calls
+async function retryAwsOperation<T>(
+  operation: () => Promise<T>,
+  maxRetries = 3,
+  delay = 1000
+): Promise<T> {
+  let lastError;
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      return await operation();
+    } catch (error) {
+      lastError = error;
+      logger.warn(`AWS operation failed (attempt ${attempt}/${maxRetries}): ${error.message}`);
+      if (attempt < maxRetries) {
+        await new Promise(resolve => setTimeout(resolve, delay * attempt));
+      }
+    }
+  }
+  throw lastError;
+}
 
 const codePrompt = `Your job is to answer questions about AWS environment by writing Javascript code using AWS SDK V2. The code must be adhering to a few rules:
 - Must be preferring promises over callbacks
@@ -140,12 +180,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request, c) => {
       }
 
       if (profileName) {
-        selectedProfileCredentials = await getCredentials(
-          profiles[profileName],
-          profileName
-        );
-        selectedProfile = profileName;
-        selectedProfileRegion = region || "us-east-1";
+        try {
+          selectedProfileCredentials = await retryAwsOperation(() => 
+            getCredentials(profiles[profileName], profileName)
+          );
+          selectedProfile = profileName;
+          selectedProfileRegion = region || "us-east-1";
+        } catch (error) {
+          logger.error(`Failed to get credentials for profile ${profileName}:`, error);
+          return createTextResponse(`Failed to authenticate with profile ${profileName}: ${error.message}`);
+        }
       }
 
       AWS.config.update({
@@ -155,35 +199,48 @@ server.setRequestHandler(CallToolRequestSchema, async (request, c) => {
 
       const wrappedCode = wrapUserCode(code);
       const wrappedIIFECode = `(async function() { return (async () => { ${wrappedCode} })(); })()`;
-      const result = await runInContext(
-        wrappedIIFECode,
-        createContext({ AWS })
-      );
-
-      return createTextResponse(JSON.stringify(result));
+      
+      try {
+        const result = await runInContext(
+          wrappedIIFECode,
+          createContext({ AWS })
+        );
+        return createTextResponse(JSON.stringify(result));
+      } catch (error) {
+        logger.error(`Code execution error:`, error);
+        return createTextResponse(`Error executing code: ${error.message}`);
+      }
     } else if (name === "list-credentials") {
       return createTextResponse(
         JSON.stringify({ profiles: Object.keys(profiles), error })
       );
     } else if (name === "select-profile") {
       const { profile, region } = SelectProfileSchema.parse(args);
-      const credentials = await getCredentials(profiles[profile], profile);
-      selectedProfile = profile;
-      selectedProfileCredentials = credentials;
-      selectedProfileRegion = region || "us-east-1";
-      return createTextResponse("Authenticated!");
+      try {
+        const credentials = await retryAwsOperation(() => 
+          getCredentials(profiles[profile], profile)
+        );
+        selectedProfile = profile;
+        selectedProfileCredentials = credentials;
+        selectedProfileRegion = region || "us-east-1";
+        return createTextResponse("Authenticated!");
+      } catch (error) {
+        logger.error(`Failed to authenticate with profile ${profile}:`, error);
+        return createTextResponse(`Authentication failed: ${error.message}`);
+      }
     } else {
       throw new Error(`Unknown tool: ${name}`);
     }
   } catch (error) {
+    logger.error(`Error handling tool request:`, error);
     if (error instanceof z.ZodError) {
-      throw new Error(
+      return createTextResponse(
         `Invalid arguments: ${error.errors
           .map((e) => `${e.path.join(".")}: ${e.message}`)
           .join(", ")}`
       );
     }
-    throw error;
+    return createTextResponse(`Error: ${error.message}`);
   }
 });
 
@@ -216,25 +273,25 @@ async function listCredentials() {
   let configs: any;
   let error: any;
   try {
-    console.error('Loading credentials from ini file...');
+    logger.info('Loading credentials from ini file...');
     credentials = new AWS.IniLoader().loadFrom({});
-    console.error('Loaded credentials:', Object.keys(credentials || {}));
+    logger.info('Loaded credentials:', Object.keys(credentials || {}));
   } catch (error) {
-    console.error('Failed to load credentials:', error);
+    logger.error('Failed to load credentials:', error);
     error = `Failed to load credentials: ${error}`;
   }
   try {
-    console.error('Loading config from ini file...');
+    logger.info('Loading config from ini file...');
     configs = new AWS.IniLoader().loadFrom({ isConfig: true });
-    console.error('Loaded configs:', Object.keys(configs || {}));
+    logger.info('Loaded configs:', Object.keys(configs || {}));
   } catch (error) {
-    console.error('Failed to load configs:', error);
+    logger.error('Failed to load configs:', error);
     error = `Failed to load configs: ${error}`;
   }
 
   const profiles = { ...(credentials || {}), ...(configs || {}) };
-  console.error('Combined profiles:', Object.keys(profiles));
-  console.error('Profile details:', JSON.stringify(profiles, null, 2));
+  logger.debug('Combined profiles:', Object.keys(profiles));
+  logger.debug('Profile details:', JSON.stringify(profiles, null, 2));
 
   return { profiles, error };
 }
@@ -243,11 +300,11 @@ async function getCredentials(
   creds: any,
   profileName: string
 ): Promise<AWS.Credentials | AWS.SSO.RoleCredentials | any> {
-  process.stderr.write(`\nDebug: Starting credential load for profile ${profileName}\n`);
-  process.stderr.write(`\nDebug: Profile config: ${JSON.stringify(creds, null, 2)}\n`);
+  logger.info(`Starting credential load for profile ${profileName}`);
+  logger.debug(`Profile config: ${JSON.stringify(creds, null, 2)}`);
   
   if (creds.sso_session) {
-    process.stderr.write('\nDebug: SSO session profile detected\n');
+    logger.info('SSO session profile detected');
     
     try {
       // First try to load the SSO session configuration
@@ -272,14 +329,14 @@ async function getCredentials(
         throw new Error('No sso_start_url found in session config');
       }
       
-      process.stderr.write(`\nDebug: Found SSO session config. Region: ${ssoRegion}\n`);
+      logger.info(`Found SSO session config. Region: ${ssoRegion}`);
       
       // Ensure SSO cache directory exists
       const ssoDir = `${process.env.HOME}/.aws/sso/cache`;
       try {
         await fs.mkdir(ssoDir, { recursive: true });
       } catch (e) {
-        process.stderr.write(`\nDebug: Error creating SSO cache directory: ${e}\n`);
+        logger.error(`Error creating SSO cache directory: ${e}`);
       }
       
       let validTokenFound = false;
@@ -288,41 +345,41 @@ async function getCredentials(
       // Try to read SSO token from cache
       try {
         const files = await fs.readdir(ssoDir);
-        process.stderr.write(`\nDebug: Found SSO cache files: ${files.join(', ')}\n`);
+        logger.debug(`Found SSO cache files: ${files.join(', ')}`);
         
         // Read each cache file to find valid token
         for (const file of files) {
           try {
             const content = await fs.readFile(`${ssoDir}/${file}`, 'utf8');
             const cache = JSON.parse(content);
-            process.stderr.write(`\nDebug: Examining cache file ${file}\n`);
+            logger.debug(`Examining cache file ${file}`);
             
             if (cache.startUrl === startUrl && cache.accessToken && cache.expiresAt && new Date(cache.expiresAt) > new Date()) {
-              process.stderr.write('\nDebug: Found valid SSO token in cache\n');
+              logger.info('Found valid SSO token in cache');
               validTokenFound = true;
               validToken = cache.accessToken;
               break;
             }
           } catch (e) {
-            process.stderr.write(`\nDebug: Error reading cache file ${file}: ${e}\n`);
+            logger.error(`Error reading cache file ${file}: ${e}`);
           }
         }
       } catch (e) {
-        process.stderr.write(`\nDebug: Error reading SSO cache directory: ${e}\n`);
+        logger.error(`Error reading SSO cache directory: ${e}`);
       }
       
       // If no valid token found, initiate SSO login
       if (!validTokenFound) {
-        process.stderr.write('\nDebug: No valid token found, initiating SSO login\n');
+        logger.info('No valid token found, initiating SSO login');
         
         try {
           // Run AWS CLI SSO login command
-          process.stderr.write(`\nDebug: Running 'aws sso login --profile ${profileName}'\n`);
-          process.stderr.write('\nPlease complete the SSO login in your browser when prompted...\n');
+          logger.info(`Running 'aws sso login --profile ${profileName}'`);
+          logger.info('Please complete the SSO login in your browser when prompted...');
           
           const { stdout, stderr } = await execPromise(`aws sso login --profile ${profileName}`);
-          process.stderr.write(`\nSSO Login stdout: ${stdout}\n`);
-          if (stderr) process.stderr.write(`\nSSO Login stderr: ${stderr}\n`);
+          logger.info(`SSO Login stdout: ${stdout}`);
+          if (stderr) logger.warn(`SSO Login stderr: ${stderr}`);
           
           // Check again for valid token after login
           const files = await fs.readdir(ssoDir);
@@ -332,17 +389,17 @@ async function getCredentials(
               const cache = JSON.parse(content);
               
               if (cache.startUrl === startUrl && cache.accessToken && cache.expiresAt && new Date(cache.expiresAt) > new Date()) {
-                process.stderr.write('\nDebug: Found valid SSO token after login\n');
+                logger.info('Found valid SSO token after login');
                 validTokenFound = true;
                 validToken = cache.accessToken;
                 break;
               }
             } catch (e) {
-              process.stderr.write(`\nDebug: Error reading cache file ${file} after login: ${e}\n`);
+              logger.error(`Error reading cache file ${file} after login: ${e}`);
             }
           }
         } catch (e) {
-          process.stderr.write(`\nDebug: Error during SSO login: ${e}\n`);
+          logger.error(`Error during SSO login: ${e}`);
         }
       }
       
@@ -352,12 +409,16 @@ async function getCredentials(
         const sso = new AWS.SSO({ region: ssoRegion });
         
         try {
-          process.stderr.write('\nDebug: Attempting to get role credentials\n');
-          const roleCredentials = await sso.getRoleCredentials({
-            accessToken: validToken,
-            accountId: creds.sso_account_id,
-            roleName: creds.sso_role_name
-          }).promise();
+          logger.info('Attempting to get role credentials');
+          
+          // Use the retry utility for the AWS API call
+          const roleCredentials = await retryAwsOperation(() => 
+            sso.getRoleCredentials({
+              accessToken: validToken,
+              accountId: creds.sso_account_id,
+              roleName: creds.sso_role_name
+            }).promise()
+          );
           
           if (!roleCredentials.roleCredentials) {
             throw new Error('No role credentials returned');
@@ -369,25 +430,25 @@ async function getCredentials(
             throw new Error('Incomplete role credentials returned');
           }
           
-          process.stderr.write('\nDebug: Successfully obtained role credentials\n');
+          logger.info('Successfully obtained role credentials');
           return new AWS.Credentials({
             accessKeyId,
             secretAccessKey,
             sessionToken
           });
         } catch (e) {
-          process.stderr.write(`\nDebug: Error getting role credentials: ${e}\n`);
+          logger.error(`Error getting role credentials: ${e}`);
         }
       } else {
-        process.stderr.write('\nDebug: Failed to obtain valid SSO token\n');
+        logger.warn('Failed to obtain valid SSO token');
       }
     } catch (e) {
-      process.stderr.write(`\nDebug: Error in SSO session handling: ${e}\n`);
+      logger.error(`Error in SSO session handling: ${e}`);
     }
   }
   
   // Fall back to standard credential provider
-  process.stderr.write('\nDebug: Falling back to standard credential provider\n');
+  logger.info('Falling back to standard credential provider');
   return useAWSCredentialsProvider(profileName);
 }
 
@@ -396,7 +457,7 @@ export const useAWSCredentialsProvider = async (
   region: string = "us-east-1",
   roleArn?: string
 ) => {
-  process.stderr.write(`\nDebug: Using credential provider for profile ${profileName}\n`);
+  logger.info(`Using credential provider for profile ${profileName}`);
   
   try {
     // Try to use AWS SDK v3 credential provider first
@@ -406,9 +467,14 @@ export const useAWSCredentialsProvider = async (
       roleArn
     });
     
-    process.stderr.write('\nDebug: Attempting to get credentials from provider chain\n');
-    const credentials = await provider();
-    process.stderr.write('\nDebug: Successfully obtained credentials from provider chain\n');
+    logger.info('Attempting to get credentials from provider chain');
+    
+    // Use retry mechanism for credential retrieval
+    const credentials = await retryAwsOperation(async () => {
+      return await provider();
+    });
+    
+    logger.info('Successfully obtained credentials from provider chain');
     
     // Convert v3 credentials to v2 format
     return new AWS.Credentials({
@@ -417,11 +483,11 @@ export const useAWSCredentialsProvider = async (
       sessionToken: credentials.sessionToken
     });
   } catch (error) {
-    process.stderr.write(`\nDebug: Provider chain error: ${error}\n`);
+    logger.error(`Provider chain error: ${error}`);
     
     // Fall back to AWS SDK v2 credential provider
     try {
-      process.stderr.write('\nDebug: Falling back to AWS SDK v2 credential provider\n');
+      logger.info('Falling back to AWS SDK v2 credential provider');
       const chain = new AWS.CredentialProviderChain([
         () => new AWS.SharedIniFileCredentials({ profile: profileName }),
         () => new AWS.ProcessCredentials({ profile: profileName }),
@@ -433,16 +499,16 @@ export const useAWSCredentialsProvider = async (
       return await new Promise((resolve, reject) => {
         chain.resolve((err, creds) => {
           if (err) {
-            process.stderr.write(`\nDebug: AWS SDK v2 provider chain error: ${err}\n`);
+            logger.error(`AWS SDK v2 provider chain error: ${err}`);
             reject(err);
           } else {
-            process.stderr.write('\nDebug: Successfully obtained credentials from AWS SDK v2 provider chain\n');
+            logger.info('Successfully obtained credentials from AWS SDK v2 provider chain');
             resolve(creds);
           }
         });
       });
     } catch (v2Error) {
-      process.stderr.write(`\nDebug: AWS SDK v2 provider chain error: ${v2Error}\n`);
+      logger.error(`AWS SDK v2 provider chain error: ${v2Error}`);
       throw v2Error;
     }
   }
@@ -451,7 +517,7 @@ export const useAWSCredentialsProvider = async (
 // Start the server
 const transport = new StdioServerTransport();
 server.connect(transport).then(() => {
-  console.error("Local Machine MCP Server running on stdio");
+  logger.info("Local Machine MCP Server running on stdio");
 });
 
 const createTextResponse = (text: string) => ({

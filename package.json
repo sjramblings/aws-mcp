@@ -16,6 +16,7 @@
     "open": "^10.1.0",
     "ts-morph": "^24.0.0",
     "tsc": "^2.0.4",
+    "winston": "^3.17.0",
     "zod": "^3.24.1"
   },
   "devDependencies": {
