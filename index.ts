@@ -146,6 +146,58 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           required: ["profile"],
         },
       },
+      {
+        name: "get-cost-usage",
+        description: "Retrieve AWS cost and usage data for analysis",
+        inputSchema: {
+          type: "object",
+          properties: {
+            startDate: {
+              type: "string",
+              description: "Start date for the cost data query in YYYY-MM-DD format",
+            },
+            endDate: {
+              type: "string",
+              description: "End date for the cost data query in YYYY-MM-DD format",
+            },
+            granularity: {
+              type: "string",
+              description: "Time granularity of the data (DAILY, MONTHLY, HOURLY)",
+              enum: ["DAILY", "MONTHLY", "HOURLY"]
+            },
+            metrics: {
+              type: "array",
+              description: "Cost metrics to include (e.g., BlendedCost, UnblendedCost, etc.)",
+              items: {
+                type: "string"
+              }
+            },
+            groupBy: {
+              type: "array",
+              description: "Dimensions to group the cost data by (e.g., SERVICE, LINKED_ACCOUNT, etc.)",
+              items: {
+                type: "object",
+                properties: {
+                  type: {
+                    type: "string",
+                    description: "Type of dimension to group by"
+                  },
+                  key: {
+                    type: "string",
+                    description: "Optional key for the dimension"
+                  }
+                },
+                required: ["type"]
+              }
+            },
+            filter: {
+              type: "object",
+              description: "Optional filter to apply to the cost data query"
+            }
+          },
+          required: ["startDate", "endDate", "granularity", "metrics"],
+        },
+      },
     ],
   };
 });
@@ -160,6 +212,20 @@ const RunAwsCodeSchema = z.object({
 const SelectProfileSchema = z.object({
   profile: z.string(),
   region: z.string().optional(),
+});
+
+const GetCostUsageSchema = z.object({
+  startDate: z.string(),
+  endDate: z.string(),
+  granularity: z.enum(["DAILY", "MONTHLY", "HOURLY"]),
+  metrics: z.array(z.string()),
+  groupBy: z.array(
+    z.object({
+      type: z.string(),
+      key: z.string().optional(),
+    })
+  ).optional(),
+  filter: z.record(z.any()).optional(),
 });
 
 // Handle tool execution
@@ -227,6 +293,70 @@ server.setRequestHandler(CallToolRequestSchema, async (request, c) => {
       } catch (error) {
         logger.error(`Failed to authenticate with profile ${profile}:`, error);
         return createTextResponse(`Authentication failed: ${error.message}`);
+      }
+    } else if (name === "get-cost-usage") {
+      if (!selectedProfile) {
+        return createTextResponse(
+          `Please select a profile first using the 'select-profile' tool! Available profiles: ${Object.keys(
+            profiles
+          ).join(", ")}`
+        );
+      }
+
+      try {
+        const params = GetCostUsageSchema.parse(args);
+        
+        // Configure AWS with the selected profile
+        AWS.config.update({
+          region: selectedProfileRegion,
+          credentials: selectedProfileCredentials,
+        });
+        
+        // Create Cost Explorer client
+        const costExplorer = new AWS.CostExplorer();
+        
+        // Prepare the request parameters
+        const costParams = {
+          TimePeriod: {
+            Start: params.startDate,
+            End: params.endDate
+          },
+          Granularity: params.granularity,
+          Metrics: params.metrics
+        };
+        
+        // Add GroupBy if provided
+        if (params.groupBy && params.groupBy.length > 0) {
+          costParams.GroupBy = params.groupBy.map(group => ({
+            Type: group.type,
+            Key: group.key
+          })).filter(group => group.Type); // Filter out any empty types
+        }
+        
+        // Add Filter if provided
+        if (params.filter) {
+          costParams.Filter = params.filter;
+        }
+        
+        logger.info(`Getting cost and usage data with params: ${JSON.stringify(costParams, null, 2)}`);
+        
+        // Make the API call with retry mechanism
+        const costData = await retryAwsOperation(() => 
+          costExplorer.getCostAndUsage(costParams).promise()
+        );
+        
+        logger.info('Successfully retrieved cost and usage data');
+        return createTextResponse(JSON.stringify(costData));
+      } catch (error) {
+        logger.error(`Error getting cost and usage data: ${error}`);
+        if (error instanceof z.ZodError) {
+          return createTextResponse(
+            `Invalid arguments for get-cost-usage: ${error.errors
+              .map((e) => `${e.path.join(".")}: ${e.message}`)
+              .join(", ")}`
+          );
+        }
+        return createTextResponse(`Error getting cost and usage data: ${error.message}`);
       }
     } else {
       throw new Error(`Unknown tool: ${name}`);
